@@ -1,6 +1,6 @@
 # app.py
 
-print("--- EXECUTING SCRIPT WITH STRONG FedProx (v13, mu=1.0, E=1) ---")
+print("--- EXECUTING SCRIPT WITH STRONG FedProx + LOW LR (v14) ---")
 
 from collections import OrderedDict
 import warnings
@@ -25,9 +25,9 @@ NUM_CLIENTS = 100
 BATCH_SIZE = 32
 NUM_ROUNDS = 50
 CLIENTS_PER_ROUND = 10
-LOCAL_EPOCHS = 1          # GIẢM SỐ EPOCH XUỐNG 1
-PROXIMAL_MU = 1.0         # TĂNG MU LÊN 1.0
-LEARNING_RATE = 0.01      # Giữ nguyên LR
+LOCAL_EPOCHS = 1          # Giữ E=1
+PROXIMAL_MU = 1.0         # Giữ mu=1.0
+LEARNING_RATE = 0.001     # GIẢM LEARNING RATE
 # --- END CHANGES ---
 
 # 2. Model Definition
@@ -71,7 +71,6 @@ def train_fedprox(net, trainloader, epochs, device, global_params, mu, lr):
             
             proximal_term = 0.0
             for local_param, global_param in zip(net.parameters(), global_params_torch):
-                # Sử dụng bình phương của norm L2, chính xác hơn
                 proximal_term += torch.square((local_param - global_param).norm(2))
             
             loss += (mu / 2) * proximal_term
@@ -160,7 +159,7 @@ if __name__ == "__main__":
 
     client_fn = client_fn_factory(trainloaders, testloader, DEVICE)
 
-    # Use the standard FedAvg strategy, as the FedProx logic is on the client side
+    # Use the standard FedAvg strategy
     strategy = fl.server.strategy.FedAvg(
         fraction_fit=CLIENTS_PER_ROUND / NUM_CLIENTS,
         fraction_evaluate=0.0,
@@ -169,7 +168,7 @@ if __name__ == "__main__":
         evaluate_fn=get_evaluate_fn(testloader, DEVICE),
     )
 
-    print("Starting Strong FedProx simulation...")
+    print("Starting Strong FedProx with Low LR simulation...")
     history = fl.simulation.start_simulation(
         client_fn=client_fn,
         num_clients=NUM_CLIENTS,
@@ -186,7 +185,7 @@ if __name__ == "__main__":
     
     plt.figure(figsize=(10, 6))
     plt.plot(rounds, accuracies, marker='o', linestyle='-')
-    plt.title("Strong FedProx (mu=1.0, E=1): Accuracy vs. Rounds")
+    plt.title("Strong FedProx (mu=1.0, E=1, lr=0.001): Accuracy vs. Rounds")
     plt.xlabel("Communication Round")
     plt.ylabel("Global Model Accuracy")
     plt.grid(True)
@@ -195,6 +194,6 @@ if __name__ == "__main__":
 
     if not os.path.exists("figures"):
         os.makedirs("figures")
-    figure_path = "figures/strong_fedprox_accuracy.png"
+    figure_path = "figures/strong_fedprox_low_lr_accuracy.png"
     plt.savefig(figure_path, dpi=600, bbox_inches='tight')
     print(f"Results saved to {figure_path}")

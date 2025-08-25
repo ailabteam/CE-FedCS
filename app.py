@@ -1,6 +1,6 @@
 # app.py
 
-print("--- EXECUTING SCRIPT WITH FedProx STRATEGY (v11) ---")
+print("--- EXECUTING SCRIPT WITH STRONG FedProx (v13, mu=1.0, E=1) ---")
 
 from collections import OrderedDict
 import warnings
@@ -19,12 +19,16 @@ from utils import load_data_cifar10, get_device
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
+# --- START CHANGES ---
 # 1. Hyperparameters
 NUM_CLIENTS = 100
 BATCH_SIZE = 32
 NUM_ROUNDS = 50
 CLIENTS_PER_ROUND = 10
-LOCAL_EPOCHS = 5
+LOCAL_EPOCHS = 1          # GIẢM SỐ EPOCH XUỐNG 1
+PROXIMAL_MU = 1.0         # TĂNG MU LÊN 1.0
+LEARNING_RATE = 0.01      # Giữ nguyên LR
+# --- END CHANGES ---
 
 # 2. Model Definition
 class Net(nn.Module):
@@ -46,10 +50,10 @@ class Net(nn.Module):
         return self.fc3(x)
 
 # 3. Train/Test Functions
-def train_fedprox(net, trainloader, epochs, device, global_params, mu=0.01):
+def train_fedprox(net, trainloader, epochs, device, global_params, mu, lr):
     """Train the model using the FedProx loss function."""
     criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(net.parameters(), lr=0.01, momentum=0.9)
+    optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9)
     net.train()
     
     global_params_torch = [torch.from_numpy(p).to(device) for p in global_params]
@@ -67,7 +71,8 @@ def train_fedprox(net, trainloader, epochs, device, global_params, mu=0.01):
             
             proximal_term = 0.0
             for local_param, global_param in zip(net.parameters(), global_params_torch):
-                proximal_term += (local_param - global_param).norm(2)
+                # Sử dụng bình phương của norm L2, chính xác hơn
+                proximal_term += torch.square((local_param - global_param).norm(2))
             
             loss += (mu / 2) * proximal_term
             
@@ -114,7 +119,10 @@ class FlowerClient(fl.client.NumPyClient):
 
     def fit(self, parameters, config):
         self.set_parameters(parameters)
-        last_epoch_loss = train_fedprox(self.net, self.trainloader, epochs=LOCAL_EPOCHS, device=self.device, global_params=parameters, mu=0.01)
+        last_epoch_loss = train_fedprox(
+            self.net, self.trainloader, epochs=LOCAL_EPOCHS, 
+            device=self.device, global_params=parameters, mu=PROXIMAL_MU, lr=LEARNING_RATE
+        )
         metrics = {"loss": last_epoch_loss}
         return self.get_parameters(config={}), len(self.trainloader.dataset), metrics
 
@@ -122,6 +130,7 @@ class FlowerClient(fl.client.NumPyClient):
         self.set_parameters(parameters)
         loss, accuracy = test(self.net, self.testloader, device=self.device)
         return float(loss), len(self.testloader.dataset), {"accuracy": float(accuracy)}
+
 
 # 5. Helper Functions for Simulation
 def get_evaluate_fn(testloader, device):
@@ -160,7 +169,7 @@ if __name__ == "__main__":
         evaluate_fn=get_evaluate_fn(testloader, DEVICE),
     )
 
-    print("Starting FedProx simulation...")
+    print("Starting Strong FedProx simulation...")
     history = fl.simulation.start_simulation(
         client_fn=client_fn,
         num_clients=NUM_CLIENTS,
@@ -177,15 +186,15 @@ if __name__ == "__main__":
     
     plt.figure(figsize=(10, 6))
     plt.plot(rounds, accuracies, marker='o', linestyle='-')
-    plt.title("FedProx: Accuracy vs. Communication Rounds (Non-IID CIFAR-10)")
+    plt.title("Strong FedProx (mu=1.0, E=1): Accuracy vs. Rounds")
     plt.xlabel("Communication Round")
     plt.ylabel("Global Model Accuracy")
     plt.grid(True)
     plt.xticks(range(0, NUM_ROUNDS + 1, 5))
-    plt.ylim(0, 1)
+    plt.ylim(0, 0.6)
 
     if not os.path.exists("figures"):
         os.makedirs("figures")
-    figure_path = "figures/fedprox_accuracy.png"
+    figure_path = "figures/strong_fedprox_accuracy.png"
     plt.savefig(figure_path, dpi=600, bbox_inches='tight')
     print(f"Results saved to {figure_path}")

@@ -1,6 +1,6 @@
 # app.py
 
-print("--- EXECUTING FINAL EXPERIMENT: FedProx + Adam + LR Decay (v15) ---")
+print("--- FEDERATED LEARNING EXPERIMENT HARNESS ---")
 
 from collections import OrderedDict
 import warnings
@@ -19,21 +19,10 @@ from utils import load_data_cifar10, get_device
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# 1. Hyperparameters
-NUM_CLIENTS = 100
-BATCH_SIZE = 32
-NUM_ROUNDS = 50
-CLIENTS_PER_ROUND = 10
-LOCAL_EPOCHS = 1
-PROXIMAL_MU = 1.0
+# =============================================================================
+# 1. SHARED COMPONENTS (MODEL, CLIENT, TRAIN/TEST FUNCTIONS)
+# =============================================================================
 
-# --- NEW: Adam + LR Decay Parameters ---
-INITIAL_LR = 0.01
-LR_DECAY_STEP = 20 # Giảm LR sau mỗi 20 vòng
-LR_DECAY_GAMMA = 0.1 # Giảm 10 lần (1/10)
-# --- END NEW ---
-
-# 2. Model Definition
 class Net(nn.Module):
     def __init__(self) -> None:
         super(Net, self).__init__()
@@ -52,21 +41,35 @@ class Net(nn.Module):
         x = F.relu(self.fc2(x))
         return self.fc3(x)
 
-# 3. Train/Test Functions
-def train_fedprox(net, trainloader, epochs, device, global_params, mu, lr):
-    """Train the model using the FedProx loss function with Adam optimizer."""
+def train(net, trainloader, epochs, device, optimizer_name, lr):
+    """Standard training function."""
     criterion = torch.nn.CrossEntropyLoss()
-    # --- NEW: Use Adam optimizer ---
-    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
-    # --- END NEW ---
+    if optimizer_name == "sgd":
+        optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9)
+    elif optimizer_name == "adam":
+        optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+    net.train()
+    for _ in range(epochs):
+        for images, labels in trainloader:
+            images, labels = images.to(device), labels.to(device)
+            optimizer.zero_grad()
+            outputs = net(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+def train_fedprox(net, trainloader, epochs, device, global_params, mu, optimizer_name, lr):
+    """FedProx training function."""
+    criterion = torch.nn.CrossEntropyLoss()
+    if optimizer_name == "sgd":
+        optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9)
+    elif optimizer_name == "adam":
+        optimizer = torch.optim.Adam(net.parameters(), lr=lr)
     net.train()
     
     global_params_torch = [torch.from_numpy(p).to(device) for p in global_params]
 
-    last_epoch_loss = 0.0
-    for epoch in range(epochs):
-        epoch_loss = 0.0
-        num_batches = 0
+    for _ in range(epochs):
         for images, labels in trainloader:
             images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad()
@@ -82,12 +85,6 @@ def train_fedprox(net, trainloader, epochs, device, global_params, mu, lr):
             
             loss.backward()
             optimizer.step()
-            
-            epoch_loss += loss.item()
-            num_batches += 1
-        if epoch == epochs - 1:
-            last_epoch_loss = epoch_loss / num_batches
-    return last_epoch_loss
 
 def test(net, testloader, device):
     criterion = torch.nn.CrossEntropyLoss()
@@ -102,10 +99,8 @@ def test(net, testloader, device):
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
     accuracy = correct / total
-    avg_loss = loss / len(testloader)
-    return avg_loss, accuracy
+    return loss / len(testloader), accuracy
 
-# 4. Flower Client
 class FlowerClient(fl.client.NumPyClient):
     def __init__(self, net, trainloader, testloader, device):
         self.net = net
@@ -123,33 +118,24 @@ class FlowerClient(fl.client.NumPyClient):
 
     def fit(self, parameters, config):
         self.set_parameters(parameters)
-        # --- NEW: Get current learning rate from server config ---
-        current_lr = config["current_lr"]
-        # --- END NEW ---
-        last_epoch_loss = train_fedprox(
-            self.net, self.trainloader, epochs=LOCAL_EPOCHS, 
-            device=self.device, global_params=parameters, mu=PROXIMAL_MU, lr=current_lr
-        )
-        metrics = {"loss": last_epoch_loss}
-        return self.get_parameters(config={}), len(self.trainloader.dataset), metrics
+        
+        train_method = config.get("train_method", "standard")
+        epochs = config.get("local_epochs", 1)
+        lr = config.get("lr", 0.01)
+        mu = config.get("mu", 0.01)
+        optimizer = config.get("optimizer", "sgd")
+
+        if train_method == "fedprox":
+            train_fedprox(self.net, self.trainloader, epochs, self.device, parameters, mu, optimizer, lr)
+        else: # Standard FedAvg
+            train(self.net, self.trainloader, epochs, self.device, optimizer, lr)
+
+        return self.get_parameters(config={}), len(self.trainloader.dataset), {}
 
     def evaluate(self, parameters, config):
         self.set_parameters(parameters)
-        loss, accuracy = test(self.net, self.testloader, device=self.device)
+        loss, accuracy = test(self.net, self.testloader, self.device)
         return float(loss), len(self.testloader.dataset), {"accuracy": float(accuracy)}
-
-
-# 5. Helper Functions for Simulation
-def get_evaluate_fn(testloader, device):
-    def evaluate(server_round: int, parameters: List[np.ndarray], config: Dict) -> Optional[Tuple[float, Dict]]:
-        net = Net().to(device)
-        params_dict = zip(net.state_dict().keys(), [torch.from_numpy(p) for p in parameters])
-        state_dict = OrderedDict(params_dict)
-        net.load_state_dict(state_dict, strict=True)
-        loss, accuracy = test(net, testloader, device)
-        print(f"Server-side evaluation round {server_round} / accuracy {accuracy} / loss {loss}")
-        return loss, {"accuracy": accuracy}
-    return evaluate
 
 def client_fn_factory(trainloaders, testloader, device):
     def client_fn(cid: str) -> fl.client.Client:
@@ -158,61 +144,120 @@ def client_fn_factory(trainloaders, testloader, device):
         return FlowerClient(net, trainloader, testloader, device).to_client()
     return client_fn
 
-# 6. Main Execution Block
-if __name__ == "__main__":
-    DEVICE = get_device()
-    print(f"Running on device: {DEVICE}")
+def get_evaluate_fn(testloader, device):
+    def evaluate(server_round: int, parameters: List[np.ndarray], config: Dict) -> Optional[Tuple[float, Dict]]:
+        net = Net().to(device)
+        params_dict = zip(net.state_dict().keys(), [torch.from_numpy(p) for p in parameters])
+        state_dict = OrderedDict(params_dict)
+        net.load_state_dict(state_dict, strict=True)
+        loss, accuracy = test(net, testloader, device)
+        print(f"Server-side evaluation round {server_round} / accuracy {accuracy}")
+        return loss, {"accuracy": accuracy}
+    return evaluate
 
-    trainloaders, testloader = load_data_cifar10(NUM_CLIENTS, BATCH_SIZE)
+# =============================================================================
+# 2. EXPERIMENT ORCHESTRATION
+# =============================================================================
 
-    client_fn = client_fn_factory(trainloaders, testloader, DEVICE)
-
-    # --- NEW: Function to pass LR to clients ---
-    def fit_config(server_round: int) -> Dict:
-        """Return training configuration dict for each round."""
-        lr = INITIAL_LR * (LR_DECAY_GAMMA ** (server_round // LR_DECAY_STEP))
-        config = {
-            "current_lr": lr,
-        }
-        print(f"Round {server_round}:- Learning rate: {lr}")
-        return config
-    # --- END NEW ---
-
+def run_experiment(experiment_config, client_fn, evaluate_fn):
+    """Run a single FL experiment."""
+    print(f"\n{'='*30}\n[RUNNING EXPERIMENT]: {experiment_config['name']}\n{'='*30}")
+    
+    # Configure the strategy
     strategy = fl.server.strategy.FedAvg(
-        fraction_fit=CLIENTS_PER_ROUND / NUM_CLIENTS,
+        fraction_fit=experiment_config["clients_per_round"] / experiment_config["num_clients"],
         fraction_evaluate=0.0,
-        min_fit_clients=CLIENTS_PER_ROUND,
-        min_available_clients=NUM_CLIENTS,
-        evaluate_fn=get_evaluate_fn(testloader, DEVICE),
-        on_fit_config_fn=fit_config,  # Pass the LR scheduler function to the strategy
+        min_fit_clients=experiment_config["clients_per_round"],
+        min_available_clients=experiment_config["num_clients"],
+        evaluate_fn=evaluate_fn,
+        on_fit_config_fn=experiment_config["fit_config_fn"],
     )
 
-    print("Starting FedProx + Adam + LR Decay simulation...")
+    # Start simulation
     history = fl.simulation.start_simulation(
         client_fn=client_fn,
-        num_clients=NUM_CLIENTS,
-        config=fl.server.ServerConfig(num_rounds=NUM_ROUNDS),
+        num_clients=experiment_config["num_clients"],
+        config=fl.server.ServerConfig(num_rounds=experiment_config["num_rounds"]),
         strategy=strategy,
-        client_resources={"num_gpus": 1.0 if DEVICE.type == "cuda" else 0.0},
+        client_resources={"num_gpus": 1.0 if get_device().type == "cuda" else 0.0},
     )
+    
+    return history
 
-    # 7. Plot results
-    print("Simulation finished. Plotting results...")
-    
-    rounds = [int(r) for r, metrics in history.metrics_centralized["accuracy"]]
-    accuracies = [float(acc) for r, acc in history.metrics_centralized["accuracy"]]
-    
-    plt.figure(figsize=(10, 6))
-    plt.plot(rounds, accuracies, marker='o', linestyle='-')
-    plt.title("FedProx with Adam and LR Decay: Accuracy vs. Rounds")
+def plot_results(results: Dict):
+    """Plot accuracy curves for all experiments."""
+    plt.figure(figsize=(12, 8))
+    for name, history in results.items():
+        rounds = [int(r) for r, _ in history.metrics_centralized["accuracy"]]
+        accuracies = [float(acc) for _, acc in history.metrics_centralized["accuracy"]]
+        plt.plot(rounds, accuracies, marker='o', linestyle='-', label=name, markersize=4)
+
+    plt.title("Comparison of FL Algorithms on Moderate Non-IID CIFAR-10")
     plt.xlabel("Communication Round")
     plt.ylabel("Global Model Accuracy")
     plt.grid(True)
-    plt.xticks(range(0, NUM_ROUNDS + 1, 5))
-    plt.ylim(0, 0.6)
+    plt.legend()
+    plt.xticks(range(0, 51, 5))
+    plt.ylim(0, 0.7)
 
     if not os.path.exists("figures"):
         os.makedirs("figures")
-    figure_path = "figures/fedprox_adam_lr_decay_accuracy.png"
+    figure_path = "figures/main_comparison.png"
     plt.savefig(figure_path, dpi=600, bbox_inches='tight')
-    print(f"Results saved to {figure_path}")
+    print(f"\nComparison plot saved to {figure_path}")
+
+
+if __name__ == "__main__":
+    # Common settings
+    NUM_ROUNDS = 50
+    NUM_CLIENTS = 100
+    CLIENTS_PER_ROUND = 10
+    
+    # Load data once
+    DEVICE = get_device()
+    print(f"Running on device: {DEVICE}")
+    trainloaders, testloader = load_data_cifar10(num_clients=NUM_CLIENTS, batch_size=32, shards_per_client=5)
+    
+    # Create a generic client_fn
+    client_fn = client_fn_factory(trainloaders, testloader, DEVICE)
+    evaluate_fn = get_evaluate_fn(testloader, DEVICE)
+
+    # Define all experiment configurations
+    experiments = [
+        {
+            "name": "FedAvg (Baseline)",
+            "fit_config_fn": lambda sr: {"train_method": "standard", "local_epochs": 5, "lr": 0.01, "optimizer": "sgd"},
+        },
+        {
+            "name": "FedProx (Weak)",
+            "fit_config_fn": lambda sr: {"train_method": "fedprox", "local_epochs": 5, "lr": 0.01, "mu": 0.01, "optimizer": "sgd"},
+        },
+        {
+            "name": "FedProx (Strong)",
+            "fit_config_fn": lambda sr: {"train_method": "fedprox", "local_epochs": 1, "lr": 0.001, "mu": 1.0, "optimizer": "sgd"},
+        },
+        {
+            "name": "Proposed (FedProx+Adam+LR Decay)",
+            "fit_config_fn": lambda sr: {
+                "train_method": "fedprox", 
+                "local_epochs": 1, 
+                "lr": 0.01 * (0.1 ** (sr // 20)), 
+                "mu": 1.0, 
+                "optimizer": "adam"
+            },
+        },
+    ]
+
+    all_results = {}
+    for exp_config in experiments:
+        # Add common parameters to each config
+        exp_config["num_rounds"] = NUM_ROUNDS
+        exp_config["num_clients"] = NUM_CLIENTS
+        exp_config["clients_per_round"] = CLIENTS_PER_ROUND
+        
+        # Run the experiment
+        history = run_experiment(exp_config, client_fn, evaluate_fn)
+        all_results[exp_config["name"]] = history
+
+    # Plot all results on one graph
+    plot_results(all_results)

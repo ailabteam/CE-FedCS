@@ -2,35 +2,41 @@
 
 import torch
 import torchvision.transforms as transforms
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, ConcatDataset
 from torchvision.datasets import CIFAR10
+import numpy as np
 
-def load_data_cifar10(num_clients: int, batch_size: int = 32):
-    """Load CIFAR-10 dataset and partition it into Non-IID subsets."""
+def load_data_cifar10(num_clients: int, batch_size: int = 32, shards_per_client: int = 2):
+    """Load CIFAR-10 and partition it into Non-IID subsets."""
     
-    # 1. Load CIFAR-10 dataset
     transform = transforms.Compose(
         [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     )
     trainset = CIFAR10(root="./data", train=True, download=True, transform=transform)
     testset = CIFAR10(root="./data", train=False, download=True, transform=transform)
 
-    # 2. Create Non-IID partitions
-    # Sort dataset by labels
-    labels = trainset.targets
-    sorted_indices = sorted(range(len(labels)), key=lambda k: labels[k])
+    # --- NEW, MORE ROBUST Non-IID PARTITIONING ---
+    num_shards = num_clients * shards_per_client
+    shard_size = len(trainset) // num_shards
     
-    # Partition indices among clients
-    partition_size = len(sorted_indices) // num_clients
-    client_indices = [sorted_indices[i * partition_size : (i + 1) * partition_size] for i in range(num_clients)]
+    # Sort data by labels
+    labels = np.array(trainset.targets)
+    sorted_indices = np.argsort(labels)
+    
+    # Create shards
+    shards = [sorted_indices[i * shard_size : (i + 1) * shard_size] for i in range(num_shards)]
+    
+    # Shuffle shards and assign to clients
+    np.random.shuffle(shards)
+    client_shards = [shards[i * shards_per_client : (i + 1) * shards_per_client] for i in range(num_clients)]
 
-    # 3. Create DataLoaders for each client
+    # Create DataLoaders for each client
     trainloaders = []
-    for indices in client_indices:
-        subset = Subset(trainset, indices)
+    for shard_list in client_shards:
+        client_indices = np.concatenate(shard_list)
+        subset = Subset(trainset, client_indices)
         trainloaders.append(DataLoader(subset, batch_size=batch_size, shuffle=True))
         
-    # The test set is shared among all clients for evaluation
     testloader = DataLoader(testset, batch_size=batch_size * 2)
 
     return trainloaders, testloader

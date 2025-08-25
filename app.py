@@ -1,6 +1,6 @@
 # app.py
 
-print("--- EXECUTING SCRIPT WITH STRONG FedProx + LOW LR (v14) ---")
+print("--- EXECUTING FINAL EXPERIMENT: FedProx + Adam + LR Decay (v15) ---")
 
 from collections import OrderedDict
 import warnings
@@ -19,16 +19,19 @@ from utils import load_data_cifar10, get_device
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# --- START CHANGES ---
 # 1. Hyperparameters
 NUM_CLIENTS = 100
 BATCH_SIZE = 32
 NUM_ROUNDS = 50
 CLIENTS_PER_ROUND = 10
-LOCAL_EPOCHS = 1          # Giữ E=1
-PROXIMAL_MU = 1.0         # Giữ mu=1.0
-LEARNING_RATE = 0.001     # GIẢM LEARNING RATE
-# --- END CHANGES ---
+LOCAL_EPOCHS = 1
+PROXIMAL_MU = 1.0
+
+# --- NEW: Adam + LR Decay Parameters ---
+INITIAL_LR = 0.01
+LR_DECAY_STEP = 20 # Giảm LR sau mỗi 20 vòng
+LR_DECAY_GAMMA = 0.1 # Giảm 10 lần (1/10)
+# --- END NEW ---
 
 # 2. Model Definition
 class Net(nn.Module):
@@ -51,9 +54,11 @@ class Net(nn.Module):
 
 # 3. Train/Test Functions
 def train_fedprox(net, trainloader, epochs, device, global_params, mu, lr):
-    """Train the model using the FedProx loss function."""
+    """Train the model using the FedProx loss function with Adam optimizer."""
     criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9)
+    # --- NEW: Use Adam optimizer ---
+    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+    # --- END NEW ---
     net.train()
     
     global_params_torch = [torch.from_numpy(p).to(device) for p in global_params]
@@ -118,9 +123,12 @@ class FlowerClient(fl.client.NumPyClient):
 
     def fit(self, parameters, config):
         self.set_parameters(parameters)
+        # --- NEW: Get current learning rate from server config ---
+        current_lr = config["current_lr"]
+        # --- END NEW ---
         last_epoch_loss = train_fedprox(
             self.net, self.trainloader, epochs=LOCAL_EPOCHS, 
-            device=self.device, global_params=parameters, mu=PROXIMAL_MU, lr=LEARNING_RATE
+            device=self.device, global_params=parameters, mu=PROXIMAL_MU, lr=current_lr
         )
         metrics = {"loss": last_epoch_loss}
         return self.get_parameters(config={}), len(self.trainloader.dataset), metrics
@@ -159,16 +167,27 @@ if __name__ == "__main__":
 
     client_fn = client_fn_factory(trainloaders, testloader, DEVICE)
 
-    # Use the standard FedAvg strategy
+    # --- NEW: Function to pass LR to clients ---
+    def fit_config(server_round: int) -> Dict:
+        """Return training configuration dict for each round."""
+        lr = INITIAL_LR * (LR_DECAY_GAMMA ** (server_round // LR_DECAY_STEP))
+        config = {
+            "current_lr": lr,
+        }
+        print(f"Round {server_round}:- Learning rate: {lr}")
+        return config
+    # --- END NEW ---
+
     strategy = fl.server.strategy.FedAvg(
         fraction_fit=CLIENTS_PER_ROUND / NUM_CLIENTS,
         fraction_evaluate=0.0,
         min_fit_clients=CLIENTS_PER_ROUND,
         min_available_clients=NUM_CLIENTS,
         evaluate_fn=get_evaluate_fn(testloader, DEVICE),
+        on_fit_config_fn=fit_config,  # Pass the LR scheduler function to the strategy
     )
 
-    print("Starting Strong FedProx with Low LR simulation...")
+    print("Starting FedProx + Adam + LR Decay simulation...")
     history = fl.simulation.start_simulation(
         client_fn=client_fn,
         num_clients=NUM_CLIENTS,
@@ -185,7 +204,7 @@ if __name__ == "__main__":
     
     plt.figure(figsize=(10, 6))
     plt.plot(rounds, accuracies, marker='o', linestyle='-')
-    plt.title("Strong FedProx (mu=1.0, E=1, lr=0.001): Accuracy vs. Rounds")
+    plt.title("FedProx with Adam and LR Decay: Accuracy vs. Rounds")
     plt.xlabel("Communication Round")
     plt.ylabel("Global Model Accuracy")
     plt.grid(True)
@@ -194,6 +213,6 @@ if __name__ == "__main__":
 
     if not os.path.exists("figures"):
         os.makedirs("figures")
-    figure_path = "figures/strong_fedprox_low_lr_accuracy.png"
+    figure_path = "figures/fedprox_adam_lr_decay_accuracy.png"
     plt.savefig(figure_path, dpi=600, bbox_inches='tight')
     print(f"Results saved to {figure_path}")

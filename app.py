@@ -1,7 +1,9 @@
 # app.py
 
-print("--- FINAL PROPOSED METHOD: Balanced FedProx + Adam + LR Decay (v16) ---")
+print("--- FEDERATED LEARNING EXPERIMENT RUNNER (v17) ---")
 
+import argparse # THÊM MỚI: Để đọc tham số dòng lệnh
+import pickle   # THÊM MỚI: Để lưu kết quả
 from collections import OrderedDict
 import warnings
 import os
@@ -12,7 +14,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-import matplotlib.pyplot as plt
 import numpy as np
 
 from utils import load_data_cifar10, get_device
@@ -20,31 +21,10 @@ from utils import load_data_cifar10, get_device
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # =============================================================================
-# 1. EXPERIMENT CONFIGURATION
+# 1. SHARED COMPONENTS (MODEL, CLIENT, TRAIN/TEST FUNCTIONS)
+#    (Không có thay đổi nào trong phần này)
 # =============================================================================
-
-# This dictionary will hold the results of all experiments
-all_histories = {}
-
-# --- NEW BALANCED HYPERPARAMETERS for the Proposed Method ---
-BALANCED_CONFIG = {
-    "name": "Proposed (Balanced FedProx)",
-    "fit_config_fn": lambda sr: {
-        "train_method": "fedprox", 
-        "local_epochs": 5,          # TĂNG: Cho phép học sâu hơn
-        "lr": 0.01 * (0.1 ** (sr // 20)), # Giữ LR Decay
-        "mu": 0.1,                  # GIẢM: Regularization vừa phải
-        "optimizer": "adam"         # Giữ Adam
-    },
-}
-# --- END NEW ---
-
-# =============================================================================
-# 2. SHARED COMPONENTS (MODEL, CLIENT, TRAIN/TEST FUNCTIONS)
-# =============================================================================
-
 class Net(nn.Module):
-    # ... (no change)
     def __init__(self) -> None:
         super(Net, self).__init__()
         self.conv1 = nn.Conv2d(3, 6, 5)
@@ -62,7 +42,6 @@ class Net(nn.Module):
         return self.fc3(x)
 
 def train(net, trainloader, epochs, device, optimizer_name, lr):
-    # ... (no change)
     criterion = torch.nn.CrossEntropyLoss()
     if optimizer_name == "sgd":
         optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9)
@@ -79,7 +58,6 @@ def train(net, trainloader, epochs, device, optimizer_name, lr):
             optimizer.step()
 
 def train_fedprox(net, trainloader, epochs, device, global_params, mu, optimizer_name, lr):
-    # ... (no change)
     criterion = torch.nn.CrossEntropyLoss()
     if optimizer_name == "sgd":
         optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9)
@@ -101,7 +79,6 @@ def train_fedprox(net, trainloader, epochs, device, global_params, mu, optimizer
             optimizer.step()
 
 def test(net, testloader, device):
-    # ... (no change)
     criterion = torch.nn.CrossEntropyLoss()
     correct, total, loss = 0, 0, 0.0
     net.eval()
@@ -117,7 +94,6 @@ def test(net, testloader, device):
     return loss / len(testloader), accuracy
 
 class FlowerClient(fl.client.NumPyClient):
-    # ... (no change)
     def __init__(self, net, trainloader, testloader, device):
         self.net = net
         self.trainloader = trainloader
@@ -147,7 +123,6 @@ class FlowerClient(fl.client.NumPyClient):
         return float(loss), len(self.testloader.dataset), {"accuracy": float(accuracy)}
 
 def client_fn_factory(trainloaders, testloader, device):
-    # ... (no change)
     def client_fn(cid: str) -> fl.client.Client:
         net = Net().to(device)
         trainloader = trainloaders[int(cid)]
@@ -155,87 +130,94 @@ def client_fn_factory(trainloaders, testloader, device):
     return client_fn
 
 def get_evaluate_fn(testloader, device):
-    # ... (no change)
     def evaluate(server_round: int, parameters: List[np.ndarray], config: Dict) -> Optional[Tuple[float, Dict]]:
         net = Net().to(device)
         params_dict = zip(net.state_dict().keys(), [torch.from_numpy(p) for p in parameters])
         state_dict = OrderedDict(params_dict)
         net.load_state_dict(state_dict, strict=True)
         loss, accuracy = test(net, testloader, device)
-        print(f"Server-side evaluation round {server_round} / accuracy {accuracy}")
+        print(f"Round {server_round} | Accuracy: {accuracy:.4f} | Loss: {loss:.4f}")
         return loss, {"accuracy": accuracy}
     return evaluate
 
 # =============================================================================
-# 3. EXPERIMENT ORCHESTRATION
+# 2. MAIN EXECUTION LOGIC
 # =============================================================================
 
-def run_experiment(experiment_config, client_fn, evaluate_fn):
-    # ... (no change)
-    print(f"\n{'='*30}\n[RUNNING EXPERIMENT]: {experiment_config['name']}\n{'='*30}")
-    strategy = fl.server.strategy.FedAvg(
-        fraction_fit=experiment_config["clients_per_round"] / experiment_config["num_clients"],
-        min_fit_clients=experiment_config["clients_per_round"],
-        min_available_clients=experiment_config["num_clients"],
-        evaluate_fn=evaluate_fn,
-        on_fit_config_fn=experiment_config["fit_config_fn"],
-    )
-    history = fl.simulation.start_simulation(
-        client_fn=client_fn,
-        num_clients=experiment_config["num_clients"],
-        config=fl.server.ServerConfig(num_rounds=experiment_config["num_rounds"]),
-        strategy=strategy,
-        client_resources={"num_gpus": 1.0 if get_device().type == "cuda" else 0.0},
-    )
-    return history
-
-def plot_results(results: Dict):
-    # ... (no change)
-    plt.figure(figsize=(12, 8))
-    for name, history in results.items():
-        rounds = [int(r) for r, _ in history.metrics_centralized["accuracy"]]
-        accuracies = [float(acc) for _, acc in history.metrics_centralized["accuracy"]]
-        plt.plot(rounds, accuracies, marker='o', linestyle='-', label=name, markersize=4)
-    plt.title("Comparison of FL Algorithms on Moderate Non-IID CIFAR-10")
-    plt.xlabel("Communication Round")
-    plt.ylabel("Global Model Accuracy")
-    plt.grid(True)
-    plt.legend()
-    plt.xticks(range(0, 51, 5))
-    plt.ylim(0.1, 0.7) # Chỉnh lại ylim để thấy rõ sự khác biệt
-    if not os.path.exists("figures"):
-        os.makedirs("figures")
-    figure_path = "figures/main_comparison.png"
-    plt.savefig(figure_path, dpi=600, bbox_inches='tight')
-    print(f"\nComparison plot saved to {figure_path}")
-
-
-if __name__ == "__main__":
+def main(args):
+    """Load data, define and run a single experiment."""
+    # Common settings
     NUM_ROUNDS = 50
     NUM_CLIENTS = 100
     CLIENTS_PER_ROUND = 10
     
+    # Load data once
     DEVICE = get_device()
     print(f"Running on device: {DEVICE}")
     trainloaders, testloader = load_data_cifar10(num_clients=NUM_CLIENTS, batch_size=32, shards_per_client=5)
     
+    # Create a generic client_fn and evaluate_fn
     client_fn = client_fn_factory(trainloaders, testloader, DEVICE)
     evaluate_fn = get_evaluate_fn(testloader, DEVICE)
 
-    # --- CHỈ CHẠY 2 THỬ NGHIỆM QUAN TRỌNG NHẤT ĐỂ TIẾT KIỆM THỜI GIAN ---
-    experiments = [
-        {
-            "name": "FedAvg (Baseline)",
+    # Define all experiment configurations
+    experiments = {
+        "fedavg": {
+            "name": "FedAvg (Baseline, E=5)",
             "fit_config_fn": lambda sr: {"train_method": "standard", "local_epochs": 5, "lr": 0.01, "optimizer": "sgd"},
         },
-        BALANCED_CONFIG, # Chạy cấu hình "cân bằng" mà chúng ta vừa định nghĩa
-    ]
+        "proposed": {
+            "name": "Proposed (Balanced FedProx, E=5, mu=0.1)",
+            "fit_config_fn": lambda sr: {
+                "train_method": "fedprox", 
+                "local_epochs": 5,
+                "lr": 0.01 * (0.1 ** (sr // 20)), 
+                "mu": 0.1,
+                "optimizer": "adam"
+            },
+        },
+    }
 
-    for exp_config in experiments:
-        exp_config["num_rounds"] = NUM_ROUNDS
-        exp_config["num_clients"] = NUM_CLIENTS
-        exp_config["clients_per_round"] = CLIENTS_PER_ROUND
-        history = run_experiment(exp_config, client_fn, evaluate_fn)
-        all_histories[exp_config["name"]] = history
+    # Select the experiment to run based on command-line argument
+    exp_config = experiments[args.experiment]
 
-    plot_results(all_histories)
+    print(f"\n{'='*30}\n[RUNNING EXPERIMENT]: {exp_config['name']}\n{'='*30}")
+    
+    # Configure the strategy
+    strategy = fl.server.strategy.FedAvg(
+        fraction_fit=CLIENTS_PER_ROUND / NUM_CLIENTS,
+        min_fit_clients=CLIENTS_PER_ROUND,
+        min_available_clients=NUM_CLIENTS,
+        evaluate_fn=evaluate_fn,
+        on_fit_config_fn=exp_config["fit_config_fn"],
+    )
+
+    # Start simulation
+    history = fl.simulation.start_simulation(
+        client_fn=client_fn,
+        num_clients=NUM_CLIENTS,
+        config=fl.server.ServerConfig(num_rounds=NUM_ROUNDS),
+        strategy=strategy,
+        client_resources={"num_gpus": 1.0 if get_device().type == "cuda" else 0.0},
+    )
+    
+    # Save the results
+    if not os.path.exists("results"):
+        os.makedirs("results")
+    
+    save_path = f"results/{args.experiment}_history.pkl"
+    with open(save_path, "wb") as f:
+        pickle.dump(history, f)
+    
+    print(f"\nExperiment '{exp_config['name']}' finished. Results saved to {save_path}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Flower Experiment Runner")
+    parser.add_argument(
+        "experiment", 
+        type=str, 
+        choices=["fedavg", "proposed"],
+        help="The name of the experiment to run."
+    )
+    args = parser.parse_args()
+    main(args)
